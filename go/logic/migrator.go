@@ -863,16 +863,21 @@ func (this *Migrator) waitForEventsUpToLock() error {
 	this.migrationContext.Log.Infof("Waiting for events up to lock")
 	atomic.StoreInt64(&this.migrationContext.AllEventsUpToLockProcessedInjectedFlag, 1)
 	var lockProcessed *lockProcessedStruct
+	ctx := this.migrationContext.GetContext()
+	this.migrationContext.Log.Infof("DEBUG: waitForEventsUpToLock ctx=%v", ctx)
 	for found := false; !found; {
 		select {
 		case <-timeout.C:
 			{
+				this.migrationContext.Log.Infof("DEBUG: timeout case selected")
 				return this.migrationContext.Log.Errorf("Timeout while waiting for events up to lock")
 			}
-		case <-this.migrationContext.GetContext().Done():
+		case <-ctx.Done():
 			{
+				this.migrationContext.Log.Infof("DEBUG: context.Done() case selected")
 				// Check if there's an abort error
 				if abortErr := this.checkAbort(); abortErr != nil {
+					this.migrationContext.Log.Infof("DEBUG: returning abort error: %v", abortErr)
 					return abortErr
 				}
 				// Context cancelled but no abort error
