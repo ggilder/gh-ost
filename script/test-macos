@@ -1,0 +1,175 @@
+#!/bin/bash
+
+# Helper script to run tests on macOS with Colima
+# This script sets up the necessary environment variables for testcontainers
+# to work properly with Colima.
+
+set -e
+
+# Detect the Docker socket location
+if [ -n "$DOCKER_HOST" ]; then
+    echo "Using existing DOCKER_HOST: $DOCKER_HOST"
+elif [ -S ~/.colima/gusto/docker.sock ]; then
+    export DOCKER_HOST=unix://$HOME/.colima/gusto/docker.sock
+    echo "Using Colima (gusto profile): $DOCKER_HOST"
+elif [ -S ~/.colima/default/docker.sock ]; then
+    export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
+    echo "Using Colima (default profile): $DOCKER_HOST"
+elif [ -S ~/.docker/run/docker.sock ]; then
+    export DOCKER_HOST=unix://$HOME/.docker/run/docker.sock
+    echo "Using Docker Desktop: $DOCKER_HOST"
+else
+    echo "Error: Could not find Docker socket"
+    echo "Please start Docker or Colima first"
+    exit 1
+fi
+
+# Disable testcontainers reaper (causes issues on macOS with Colima)
+export TESTCONTAINERS_RYUK_DISABLED=true
+
+# Run the test script
+case "$1" in
+    cibuild)
+        export GOROOT="/opt/homebrew/Cellar/go@1.24/1.24.13_1/libexec"
+        export PATH="$GOROOT/bin:$PATH"
+        echo "Using Go version: $(go version)"
+
+        # Setup cleanup trap to run even if tests fail
+        cleanup_containers() {
+            echo "Cleaning up test containers..."
+            # Only clean up containers created by testcontainers (not other MySQL containers)
+            TEST_CONTAINERS=$(docker ps -aq --filter "label=org.testcontainers=true" --filter "ancestor=mysql:8.0.42" 2>/dev/null || true)
+            if [ -n "$TEST_CONTAINERS" ]; then
+                echo "Stopping and removing $(echo "$TEST_CONTAINERS" | wc -l | tr -d ' ') testcontainer MySQL instances..."
+                docker stop $TEST_CONTAINERS >/dev/null 2>&1 || true
+                docker rm $TEST_CONTAINERS >/dev/null 2>&1 || true
+                echo "Cleanup complete"
+            else
+                echo "No test containers to clean up"
+            fi
+        }
+        trap cleanup_containers EXIT
+
+        echo "Running cibuild tests..."
+        script/cibuild
+        ;;
+    replica)
+        export GOROOT="/opt/homebrew/Cellar/go@1.24/1.24.13_1/libexec"
+        export PATH="$GOROOT/bin:$PATH"
+        echo "Using Go version: $(go version)"
+        echo "Running replica tests..."
+        if [ "$2" = "up" ]; then
+            script/docker-gh-ost-replica-tests up "${@:3}"
+        elif [ "$2" = "down" ]; then
+            script/docker-gh-ost-replica-tests down
+        elif [ "$2" = "run" ]; then
+            script/docker-gh-ost-replica-tests run "${@:3}"
+        else
+            echo "Usage: script/test-macos replica [up|down|run] [options]"
+            echo ""
+            echo "Examples:"
+            echo "  script/test-macos replica up              # Start MySQL containers"
+            echo "  script/test-macos replica run             # Run replica tests"
+            echo "  script/test-macos replica down            # Stop and remove containers"
+            echo ""
+            echo "For toxiproxy support, add -t flag:"
+            echo "  script/test-macos replica up -t"
+            echo "  script/test-macos replica run -t"
+            exit 1
+        fi
+        ;;
+    replica-docker)
+        echo "Running replica tests in Linux container..."
+        TEST_PATTERN="${2:-.}"
+        TEST_MYSQL_IMAGE="${TEST_MYSQL_IMAGE:-mysql:8.0.41}"
+
+        # Build the test image if it doesn't exist
+        if ! docker image inspect gh-ost-replica-test:latest >/dev/null 2>&1; then
+            echo "Building test image (this will be cached for future runs)..."
+            docker build --platform linux/amd64 -f Dockerfile.replica-test -t gh-ost-replica-test:latest . || {
+                echo "Error: Failed to build test image"
+                exit 1
+            }
+            echo "Test image built successfully"
+        else
+            echo "Using cached test image"
+        fi
+
+        echo "Starting Linux test container..."
+        echo "Test pattern: $TEST_PATTERN"
+        echo "MySQL image: $TEST_MYSQL_IMAGE"
+
+        # Create a temp file for logs
+        LOG_FILE=$(mktemp /tmp/gh-ost-docker-test.XXXXXX)
+        echo "Logs will be written to: $LOG_FILE"
+
+        # Run test in background and capture container ID
+        CONTAINER_ID=$(docker run -d \
+            --pull never \
+            --platform linux/amd64 \
+            -v $(pwd):/gh-ost \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e DOCKER_HOST=unix:///var/run/docker.sock \
+            -e TEST_MYSQL_IMAGE="$TEST_MYSQL_IMAGE" \
+            --network host \
+            -w /gh-ost \
+            gh-ost-replica-test:latest \
+            bash -c "
+                set -e
+                script/docker-gh-ost-replica-tests run $TEST_PATTERN
+            ")
+
+        echo "Container ID: $CONTAINER_ID"
+        echo ""
+
+        # Tail logs in real-time
+        docker logs -f $CONTAINER_ID 2>&1 | tee "$LOG_FILE"
+
+        # Wait for container to finish and get exit code
+        EXIT_CODE=$(docker wait $CONTAINER_ID)
+
+        # Cleanup
+        docker rm $CONTAINER_ID >/dev/null 2>&1 || true
+
+        echo ""
+        echo "Test completed with exit code: $EXIT_CODE"
+        echo "Full logs saved to: $LOG_FILE"
+
+        exit $EXIT_CODE
+        ;;
+    lint)
+        export GOROOT="/opt/homebrew/Cellar/go@1.23/1.23.12/libexec"
+        export PATH="$GOROOT/bin:$PATH"
+        echo "Using Go version: $(go version)"
+        echo "Running golangci-lint..."
+        if ! command -v golangci-lint &> /dev/null; then
+            echo "Error: golangci-lint not found"
+            echo "Install with: brew install golangci-lint"
+            echo "Or visit: https://golangci-lint.run/usage/install/"
+            exit 1
+        fi
+        golangci-lint version
+        golangci-lint run "${@:2}"
+        ;;
+    *)
+        echo "Usage: script/test-macos [cibuild|replica|replica-docker|lint]"
+        echo ""
+        echo "Commands:"
+        echo "  cibuild              Run CI build tests (unit tests)"
+        echo "  replica up           Start MySQL replica test containers"
+        echo "  replica run          Run replica integration tests"
+        echo "  replica down         Stop and remove replica test containers"
+        echo "  replica-docker       Run replica tests in Linux container (simulates CI)"
+        echo "  lint                 Run golangci-lint (v1.61.0)"
+        echo ""
+        echo "Examples:"
+        echo "  script/test-macos cibuild"
+        echo "  script/test-macos replica up"
+        echo "  script/test-macos replica run"
+        echo "  script/test-macos replica down"
+        echo "  script/test-macos replica-docker                          # Run all tests"
+        echo "  script/test-macos replica-docker panic-on-warnings        # Run specific test"
+        echo "  script/test-macos lint"
+        exit 1
+        ;;
+esac

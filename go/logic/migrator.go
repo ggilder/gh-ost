@@ -160,9 +160,12 @@ func (this *Migrator) retryOperation(operation func() error, notFatalHint ...boo
 			// sleep after previous iteration
 			RetrySleepFn(1 * time.Second)
 			// Check for abort before retrying
+			this.migrationContext.Log.Infof("DEBUG: retryOperation checking for abort (iteration %d)", i)
 			if abortErr := this.checkAbort(); abortErr != nil {
+				this.migrationContext.Log.Infof("DEBUG: retryOperation found abort error: %v", abortErr)
 				return abortErr
 			}
+			this.migrationContext.Log.Infof("DEBUG: retryOperation no abort error found, continuing")
 		}
 		err = operation()
 		if err == nil {
