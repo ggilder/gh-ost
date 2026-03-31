@@ -869,6 +869,15 @@ func (this *Migrator) waitForEventsUpToLock() error {
 			{
 				return this.migrationContext.Log.Errorf("Timeout while waiting for events up to lock")
 			}
+		case <-this.migrationContext.GetContext().Done():
+			{
+				// Check if there's an abort error
+				if abortErr := this.checkAbort(); abortErr != nil {
+					return abortErr
+				}
+				// Context cancelled but no abort error
+				return this.migrationContext.Log.Errorf("Context cancelled while waiting for events up to lock")
+			}
 		case lockProcessed = <-this.allEventsUpToLockProcessed:
 			{
 				if lockProcessed.state == allEventsUpToLockProcessedChallenge {
