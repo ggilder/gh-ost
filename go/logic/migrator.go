@@ -165,15 +165,17 @@ func (this *Migrator) retryOperation(operation func() error, notFatalHint ...boo
 			}
 		}
 		err = operation()
-		if err != nil && strings.Contains(err.Error(), "warnings detected") {
-			// Warnings detected - this is a fatal error that should not be retried.
-			// Send to PanicAbort and return immediately without retrying.
-			this.migrationContext.Log.Errorf("warnings detected, sending to PanicAbort: %v", err)
-			// Use helper to prevent deadlock if listenOnPanicAbort already exited
-			_ = base.SendWithContext(this.migrationContext.GetContext(), this.migrationContext.PanicAbort, err)
-			return err
-		}
-		if err == nil {
+		if err != nil {
+			this.migrationContext.Log.Errorf("retryOperation iteration %d got error: %v", i, err)
+			if strings.Contains(err.Error(), "warnings detected") {
+				// Warnings detected - this is a fatal error that should not be retried.
+				// Send to PanicAbort and return immediately without retrying.
+				this.migrationContext.Log.Errorf("warnings detected, sending to PanicAbort: %v", err)
+				// Use helper to prevent deadlock if listenOnPanicAbort already exited
+				_ = base.SendWithContext(this.migrationContext.GetContext(), this.migrationContext.PanicAbort, err)
+				return err
+			}
+		} else {
 			return nil
 		}
 		// there's an error. Let's try again.
