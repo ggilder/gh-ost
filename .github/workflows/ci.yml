@@ -25,3 +25,26 @@ jobs:
       with:
         name: gh-ost
         path: bin/gh-ost
+
+  cancellation-safety:
+    name: cancellation-safety
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: go.mod
+
+    # tools/ctxrecv is a separate module so that golang.org/x/tools never
+    # reaches the parent go.mod or vendor/. See tools/ctxrecv/README.md.
+    - name: Test analyzer
+      run: go -C tools/ctxrecv test ./...
+
+    - name: Check for receives that cancellation cannot wake
+      run: |
+        go -C tools/ctxrecv build -o "$RUNNER_TEMP/ctxrecv" .
+        "$RUNNER_TEMP/ctxrecv" ./go/...
