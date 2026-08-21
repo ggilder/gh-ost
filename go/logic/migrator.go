@@ -380,10 +380,21 @@ func (mgtr *Migrator) abort(err error) {
 	mgtr.migrationContext.Log.Errorf("migration aborted: %v", err)
 }
 
-// listenOnPanicAbort listens for fatal errors and initiates graceful shutdown
+// listenOnPanicAbort listens for fatal errors and initiates graceful shutdown.
+//
+// Every publisher on PanicAbort uses base.SendWithContext, so once the
+// migration context is cancelled none of them will ever send. That happens
+// whenever a path aborts directly rather than via PanicAbort -- see
+// consumeRowCopyComplete, which calls abort() itself -- so waiting on the
+// channel alone would park this goroutine for the lifetime of the process.
 func (mgtr *Migrator) listenOnPanicAbort() {
-	err := <-mgtr.migrationContext.PanicAbort
-	mgtr.abort(err)
+	select {
+	case err := <-mgtr.migrationContext.PanicAbort:
+		mgtr.abort(err)
+	case <-mgtr.migrationContext.GetContext().Done():
+		// Something already aborted and cancelled the context; the abort error
+		// is stored and no further publisher can reach us.
+	}
 }
 
 // validateAlterStatement validates the `alter` statement meets criteria.
@@ -1778,7 +1789,19 @@ func (mgtr *Migrator) onApplyEventStruct(eventStruct *applyEventStruct) error {
 			availableEvents = batchSize - 1
 		}
 		for i := 0; i < availableEvents; i++ {
-			additionalStruct := <-mgtr.applyEventsQueue
+			// availableEvents came from len() above, so an event is normally
+			// waiting. Take it without blocking anyway: every publisher on
+			// applyEventsQueue uses base.SendWithContext and stops sending once
+			// the migration context is cancelled, so a blocking receive here
+			// would park with no way to be woken.
+			var additionalStruct *applyEventStruct
+			select {
+			case additionalStruct = <-mgtr.applyEventsQueue:
+			default:
+			}
+			if additionalStruct == nil {
+				break
+			}
 			if additionalStruct.dmlEvent == nil {
 				// Not a DML. We don't group this, and we don't batch any further
 				nonDmlStructToApply = additionalStruct
