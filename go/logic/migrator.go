@@ -553,6 +553,17 @@ func (mgtr *Migrator) Migrate() (err error) {
 		} else {
 			mgtr.migrationContext.Log.Infof("Attempting to execute alter with ALGORITHM=INSTANT")
 			if err := mgtr.applier.AttemptInstantDDL(); err == nil {
+				// initiateApplier emits the GhostTableMigrated signal whenever
+				// !Revert && !Resume, regardless of whether instant DDL succeeds.
+				// The publisher (onChangelogStateEvent) sends it synchronously while
+				// holding EventsStreamer.listenersMutex, so it must be drained here
+				// or the send blocks forever, and finalCleanup then deadlocks closing
+				// the binlog reader, which needs the same mutex.
+				if !mgtr.migrationContext.Resume {
+					if err := mgtr.waitForGhostTableMigrated(); err != nil {
+						return err
+					}
+				}
 				if err := mgtr.finalCleanup(); err != nil {
 					return nil
 				}
